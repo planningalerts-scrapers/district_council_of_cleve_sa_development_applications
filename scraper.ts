@@ -666,6 +666,7 @@ function parseApplicationElements(elements: Element[], startElement: Element, in
         console.log(`Could not find the application number on the PDF page for the current development application.  The development application will be ignored.  Elements: ${elementSummary}`);
         return undefined;
     }
+    applicationNumber = applicationNumber.trim().replace(/\s[A-Z]*$/i, "").replace(/\s\s+/g, "").trim();
     console.log(`    Found \"${applicationNumber}\".`);
 
     // Get the description.
@@ -674,7 +675,7 @@ function parseApplicationElements(elements: Element[], startElement: Element, in
 
     // Get the received date.
 
-    let receivedDateText = getRightText(elements, "Lodged Received:", "Approval Date:", "Description:");
+    let receivedDateText = getRightText(elements, "Lodged Date:", "Approval Date:", "Description:");
     let receivedDate: moment.Moment = undefined;
     if (receivedDateText !== undefined)
         receivedDate = moment(receivedDateText.trim(), "D/MM/YYYY", true);
@@ -880,7 +881,7 @@ async function main() {
     // process).
 
     let selectedPdfUrls: string[] = [];
-    selectedPdfUrls.push(pdfUrls.shift());
+    selectedPdfUrls.push(pdfUrls.pop());
     if (pdfUrls.length > 0)
         selectedPdfUrls.push(pdfUrls[getRandom(0, pdfUrls.length)]);
     if (getRandom(0, 2) === 0)
