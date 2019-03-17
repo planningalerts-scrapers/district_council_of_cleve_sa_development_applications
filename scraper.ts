@@ -114,6 +114,22 @@ function intersect(rectangle1: Rectangle, rectangle2: Rectangle): Rectangle {
         return { x: 0, y: 0, width: 0, height: 0 };
 }
 
+// Calculates the fraction of an element that lies within a rectangle (as a percentage).  For
+// example, if a quarter of the specifed element lies within the specified rectangle then this
+// would return 25.
+
+function getPercentageOfElementInRectangle(element: Element, rectangle: Rectangle) {
+    let elementArea = getArea(element);
+    let intersectionArea = getArea(intersect(rectangle, element));
+    return (elementArea === 0) ? 0 : ((intersectionArea * 100) / elementArea);
+}
+
+// Calculates the area of a rectangle.
+
+function getArea(rectangle: Rectangle) {
+    return rectangle.width * rectangle.height;
+}
+
 // Calculates the square of the Euclidean distance between two elements.
 
 function calculateDistance(element1: Element, element2: Element) {
@@ -658,9 +674,27 @@ function addressComparer(a, b) {
 // Parses the details from the elements associated with a single development application.
 
 function parseApplicationElements(elements: Element[], startElement: Element, informationUrl: string) {
+    let applicationNumberHeadingElement = elements.find(element => element.text.toLowerCase().replace(/\s/g, "").startsWith("applicationnumber"));
+    let lodgedDateHeadingElement = elements.find(element => element.text.toLowerCase().replace(/\s/g, "").startsWith("lodgeddate"));
+    let approvalDateHeadingElement = elements.find(element => element.text.toLowerCase().replace(/\s/g, "").startsWith("approvaldate"));
+    let descriptionHeadingElement = elements.find(element => element.text.toLowerCase().replace(/\s/g, "").startsWith("description"));
+    let propertyAddressHeadingElement = elements.find(element => element.text.toLowerCase().replace(/\s/g, "").startsWith("propertyaddress"));
+    let legalDescriptionHeadingElement = elements.find(element => element.text.toLowerCase().replace(/\s/g, "").startsWith("legaldescription"));
+
     // Get the application number.
 
-    let applicationNumber = getRightText(elements, "Application Number:", "Lodged Date:", "Description:");
+    if (applicationNumberHeadingElement === undefined) {
+        let elementSummary = elements.map(element => `[${element.text}]`).join("");
+        console.log(`Could not find the "Application Number" heading on the PDF page for the current development application.  The development application will be ignored.  Elements: ${elementSummary}`);
+        return undefined;
+    }
+    let applicationNumberBounds = {
+        x: applicationNumberHeadingElement.x + applicationNumberHeadingElement.width,
+        y: applicationNumberHeadingElement.y,
+        width: (lodgedDateHeadingElement === undefined) ? 2 * applicationNumberHeadingElement.width : (lodgedDateHeadingElement.x - applicationNumberHeadingElement.x - applicationNumberHeadingElement.width),
+        height: applicationNumberHeadingElement.height
+    };
+    let applicationNumber = elements.filter(element => getPercentageOfElementInRectangle(element, applicationNumberBounds) > 10).map(element => element.text).join(" ").trim().replace(/\s\s+/g, " ");
     if (applicationNumber === undefined || applicationNumber === "") {
         let elementSummary = elements.map(element => `[${element.text}]`).join("");
         console.log(`Could not find the application number on the PDF page for the current development application.  The development application will be ignored.  Elements: ${elementSummary}`);
@@ -669,20 +703,49 @@ function parseApplicationElements(elements: Element[], startElement: Element, in
     applicationNumber = applicationNumber.trim().replace(/\s[A-Z]*$/i, "").replace(/\s\s+/g, "").trim();
     console.log(`    Found \"${applicationNumber}\".`);
 
-    // Get the description.
-
-    let description = getRightText(elements, "Description:", undefined, "Applicant Name:");
-
     // Get the received date.
 
-    let receivedDateText = getRightText(elements, "Lodged Date:", "Approval Date:", "Description:");
     let receivedDate: moment.Moment = undefined;
-    if (receivedDateText !== undefined)
-        receivedDate = moment(receivedDateText.trim(), "D/MM/YYYY", true);
+    if (lodgedDateHeadingElement !== undefined) {
+        let receivedDateBounds = {
+            x: lodgedDateHeadingElement.x + lodgedDateHeadingElement.width,
+            y: lodgedDateHeadingElement.y,
+            width: (approvalDateHeadingElement === undefined) ? 2 * lodgedDateHeadingElement.width : (approvalDateHeadingElement.x - lodgedDateHeadingElement.x - lodgedDateHeadingElement.width),
+            height: lodgedDateHeadingElement.height
+        };
+        let receivedDateText = elements.filter(element => getPercentageOfElementInRectangle(element, receivedDateBounds) > 10).map(element => element.text).join("").trim().replace(/\s\s+/g, " ");
+        if (receivedDateText !== undefined)
+            receivedDate = moment(receivedDateText.trim(), "D/M/YYYY", true);
+    }
+
+    // Get the description.
+
+    let description = "";
+    if (descriptionHeadingElement !== undefined) {
+        let descriptionBounds = {
+            x: descriptionHeadingElement.x + descriptionHeadingElement.width,
+            y: descriptionHeadingElement.y,
+            width: Number.MAX_VALUE,
+            height: descriptionHeadingElement.height
+        };
+        description = elements.filter(element => getPercentageOfElementInRectangle(element, descriptionBounds) > 10).map(element => element.text).join(" ").trim().replace(/\s\s+/g, " ");
+    }
 
     // Get the address.
 
-    let address = getRightText(elements, "Property Address", undefined, "Legal Description:");
+    if (propertyAddressHeadingElement === undefined) {
+        let elementSummary = elements.map(element => `[${element.text}]`).join("");
+        console.log(`Could not find the "Property Address" heading on the PDF page for the current development application.  The development application will be ignored.  Elements: ${elementSummary}`);
+        return undefined;
+    }
+    let addressBounds = {
+        x: propertyAddressHeadingElement.x + propertyAddressHeadingElement.width,
+        y: propertyAddressHeadingElement.y,
+        width: Number.MAX_VALUE,
+        height: (legalDescriptionHeadingElement === undefined) ? Number.MAX_VALUE : (legalDescriptionHeadingElement.y - propertyAddressHeadingElement.y)
+    };
+    let address = elements.filter(element => getPercentageOfElementInRectangle(element, addressBounds) > 10).map(element => element.text).join(" ").trim().replace(/\s\s+/g, " ");
+
     if (address === undefined || address.trim() === "")
     {
         let elementSummary = elements.map(element => `[${element.text}]`).join("");
@@ -692,7 +755,16 @@ function parseApplicationElements(elements: Element[], startElement: Element, in
 
     // Get the legal description.
 
-    let legalDescription = getRightText(elements, "Legal Description:", undefined, undefined);
+    let legalDescription = "";
+    if (legalDescriptionHeadingElement !== undefined) {
+        let legalDescriptionBounds = {
+            x: legalDescriptionHeadingElement.x + legalDescriptionHeadingElement.width,
+            y: legalDescriptionHeadingElement.y,
+            width: Number.MAX_VALUE,
+            height: Number.MAX_VALUE
+        };
+        legalDescription = elements.filter(element => getPercentageOfElementInRectangle(element, legalDescriptionBounds) > 10).map(element => element.text).join(" ").trim().replace(/\s\s+/g, " ");
+    }
 
     // Construct the resulting application information.
     
