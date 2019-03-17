@@ -20,6 +20,8 @@ sqlite3.verbose();
 const DevelopmentApplicationsUrl = "https://www.cleve.sa.gov.au/registers";
 const CommentUrl = "mailto:council@cleve.sa.gov.au";
 
+const Tolerance = 3;
+
 declare const process: any;
 
 // All valid street names, street suffixes, suburb names and hundred names.
@@ -101,6 +103,16 @@ function getRowTop(elements: Element[], startElement: Element) {
     return top;
 }
 
+// Constructs a rectangle based on the union of the two specified rectangles.
+
+function union(rectangle1: Rectangle, rectangle2: Rectangle): Rectangle {
+    let x = Math.min(rectangle1.x, rectangle2.x);
+    let y = Math.min(rectangle1.y, rectangle1.y);
+    let width = Math.max(Math.max(rectangle1.x + rectangle1.width, rectangle2.x + rectangle2.width) - x, 0);
+    let height = Math.max(Math.max(rectangle1.y + rectangle1.height, rectangle2.y + rectangle2.height) - y, 0);
+    return { x: x, y: y, width: width, height: height };
+}
+
 // Constructs a rectangle based on the intersection of the two specified rectangles.
 
 function intersect(rectangle1: Rectangle, rectangle2: Rectangle): Rectangle {
@@ -164,16 +176,17 @@ function getRightElement(elements: Element[], element: Element) {
     for (let rightElement of elements)
         if (isVerticalOverlap(element, rightElement) &&  // ensure that there is at least some vertical overlap
             getVerticalOverlapPercentage(element, rightElement) > 50 &&  // avoid extremely tall elements (ensure at least 50% overlap)
-            (rightElement.x > element.x + element.width) &&  // ensure the element actually is to the right
+            (rightElement.x > element.x + element.width - Tolerance) &&  // ensure the element actually is to the right (approximately)
             (rightElement.x - (element.x + element.width) < 30) &&  // avoid elements that appear after a large gap (arbitrarily ensure less than a 30 pixel gap horizontally)
             calculateDistance(element, rightElement) < calculateDistance(element, closestElement))  // check if closer than any element encountered so far
             closestElement = rightElement;
     return (closestElement.text === undefined) ? undefined : closestElement;
 }
 
-// Finds the element that most closely matches the specified text.
+// Finds the elements that most closely match the specified text and returns a rectangle that
+// encompasses all of those elements.
 
-function findElement(elements: Element[], text: string, shouldSelectRightmostElement: boolean) {
+function findTextBounds(elements: Element[], text: string) {
     // Examine all the elements on the page that being with the same character as the requested
     // text.
     
@@ -198,11 +211,11 @@ function findElement(elements: Element[], text: string, shouldSelectRightmostEle
                 break;
             if (currentText.length >= condensedText.length - 2) {  // ignore until the text is close to long enough
                 if (currentText === condensedText)
-                    matches.push({ leftElement: rightElements[0], rightElement: rightElement, threshold: 0, text: currentText });
+                    matches.push({ elements: [...rightElements], threshold: 0, text: currentText });
                 else if (didYouMean(currentText, [ condensedText ], { caseSensitive: false, returnType: didyoumean.ReturnTypeEnums.FIRST_CLOSEST_MATCH, thresholdType: didyoumean.ThresholdTypeEnums.EDIT_DISTANCE, threshold: 1, trimSpaces: true }) !== null)
-                    matches.push({ leftElement: rightElements[0], rightElement: rightElement, threshold: 1, text: currentText });
+                    matches.push({ elements: [...rightElements], threshold: 1, text: currentText });
                 else if (didYouMean(currentText, [ condensedText ], { caseSensitive: false, returnType: didyoumean.ReturnTypeEnums.FIRST_CLOSEST_MATCH, thresholdType: didyoumean.ThresholdTypeEnums.EDIT_DISTANCE, threshold: 2, trimSpaces: true }) !== null)
-                    matches.push({ leftElement: rightElements[0], rightElement: rightElement, threshold: 2, text: currentText });
+                    matches.push({ elements: [...rightElements], threshold: 2, text: currentText });
             }
 
             rightElement = getRightElement(elements, rightElement);
@@ -223,7 +236,13 @@ function findElement(elements: Element[], text: string, shouldSelectRightmostEle
             (previous === undefined ||
             current.threshold < previous.threshold ||
             (current.threshold === previous.threshold && Math.abs(current.text.trim().length - condensedText.length) < Math.abs(previous.text.trim().length - condensedText.length)) ? current : previous), undefined);
-        return shouldSelectRightmostElement ? bestMatch.rightElement : bestMatch.leftElement;
+
+        // Union together the rectangles of all elements belonging to the best match.
+
+        let rectangle = undefined;
+        for (let element of bestMatch.elements)
+            rectangle = (rectangle === undefined) ? element : union(rectangle, element);
+        return { x: rectangle.x, y: rectangle.y, width: rectangle.width, height: rectangle.height };
     }
 
     return undefined;
@@ -285,414 +304,28 @@ function findStartElements(elements: Element[]) {
     return startElements;
 }
 
-// Gets the text to the right in a rectangle, where the rectangle is delineated by the positions
-// in which the three specified strings of (case sensitive) text are found.
-
-function getRightText(elements: Element[], topLeftText: string, rightText: string, bottomText: string) {
-    // Construct a bounding rectangle in which the expected text should appear.  Any elements
-    // over 50% within the bounding rectangle will be assumed to be part of the expected text.
-
-    let topLeftElement = findElement(elements, topLeftText, true);
-    let rightElement = (rightText === undefined) ? undefined : findElement(elements, rightText, false);
-    let bottomElement = (bottomText === undefined) ? undefined : findElement(elements, bottomText, false);
-    if (topLeftElement === undefined)
-        return undefined;
-
-    let x = topLeftElement.x + topLeftElement.width;
-    let y = topLeftElement.y;
-    let width = (rightElement === undefined) ? Number.MAX_VALUE : (rightElement.x - x);
-    let height = (bottomElement === undefined) ? Number.MAX_VALUE : (bottomElement.y - y);
-
-    let bounds: Rectangle = { x: x, y: y, width: width, height: height };
-
-    // Gather together all elements that are at least 50% within the bounding rectangle.
-
-    let intersectingElements: Element[] = []
-    for (let element of elements) {
-        let intersectingBounds = intersect(element, bounds);
-        let intersectingArea = intersectingBounds.width * intersectingBounds.height;
-        let elementArea = element.width * element.height;
-        if (elementArea > 0 && intersectingArea * 2 > elementArea && element.text !== ":")
-            intersectingElements.push(element);
-    }
-    if (intersectingElements.length === 0)
-        return undefined;
-
-    // Sort the elements by Y co-ordinate and then by X co-ordinate.
-
-    let elementComparer = (a: Element, b: Element) => (a.y > b.y) ? 1 : ((a.y < b.y) ? -1 : ((a.x > b.x) ? 1 : ((a.x < b.x) ? -1 : 0)));
-    intersectingElements.sort(elementComparer);
-
-    // Join the elements into a single string.
-
-    return intersectingElements.map(element => element.text).join(" ").trim().replace(/\s\s+/g, " ");
-}
-
-// Gets the text to the left in a rectangle, where the rectangle is delineated by the positions
-// in which the three specified strings of (case sensitive) text are found.
-
-function getLeftText(elements: Element[], topRightText: string, leftText: string, bottomText: string) {
-    // Construct a bounding rectangle in which the expected text should appear.  Any elements
-    // over 50% within the bounding rectangle will be assumed to be part of the expected text.
-
-    let topRightElement = findElement(elements, topRightText, true);
-    let leftElement = (leftText === undefined) ? undefined : findElement(elements, leftText, false);
-    let bottomElement = (bottomText === undefined) ? undefined : findElement(elements, bottomText, false);
-    if (topRightElement === undefined || leftElement === undefined || bottomElement === undefined)
-        return undefined;
-
-    let x = leftElement.x + leftElement.width;
-    let y = topRightElement.y;
-    let width = topRightElement.x - x;
-    let height = bottomElement.y - y;
-
-    let bounds: Rectangle = { x: x, y: y, width: width, height: height };
-
-    // Gather together all elements that are at least 50% within the bounding rectangle.
-
-    let intersectingElements: Element[] = []
-    for (let element of elements) {
-        let intersectingBounds = intersect(element, bounds);
-        let intersectingArea = intersectingBounds.width * intersectingBounds.height;
-        let elementArea = element.width * element.height;
-        if (elementArea > 0 && intersectingArea * 2 > elementArea && element.text !== ":")
-            intersectingElements.push(element);
-    }
-    if (intersectingElements.length === 0)
-        return undefined;
-
-    // Sort the elements by Y co-ordinate and then by X co-ordinate.
-
-    let elementComparer = (a: Element, b: Element) => (a.y > b.y) ? 1 : ((a.y < b.y) ? -1 : ((a.x > b.x) ? 1 : ((a.x < b.x) ? -1 : 0)));
-    intersectingElements.sort(elementComparer);
-
-    // Join the elements into a single string.
-
-    return intersectingElements.map(element => element.text).join(" ").trim().replace(/\s\s+/g, " ");
-}
-
-// Gets the text downwards in a rectangle, where the rectangle is delineated by the positions in
-// which the three specified strings of (case sensitive) text are found.
-
-function getDownText(elements: Element[], topText: string, rightText: string, bottomText: string) {
-    // Construct a bounding rectangle in which the expected text should appear.  Any elements
-    // over 50% within the bounding rectangle will be assumed to be part of the expected text.
-
-    let topElement = findElement(elements, topText, true);
-    let rightElement = (rightText === undefined) ? undefined : findElement(elements, rightText, false);
-    let bottomElement = (bottomText === undefined) ? undefined: findElement(elements, bottomText, false);
-    if (topElement === undefined)
-        return undefined;
-
-    let x = topElement.x;
-    let y = topElement.y + topElement.height;
-    let width = (rightElement === undefined) ? Number.MAX_VALUE : (rightElement.x - x);
-    let height = (bottomElement === undefined) ? Number.MAX_VALUE : (bottomElement.y - y);
-
-    let bounds: Rectangle = { x: x, y: y, width: width, height: height };
-
-    // Gather together all elements that are at least 50% within the bounding rectangle.
-
-    let intersectingElements: Element[] = []
-    for (let element of elements) {
-        let intersectingBounds = intersect(element, bounds);
-        let intersectingArea = intersectingBounds.width * intersectingBounds.height;
-        let elementArea = element.width * element.height;
-        if (elementArea > 0 && intersectingArea * 2 > elementArea && element.text !== ":")
-            intersectingElements.push(element);
-    }
-    if (intersectingElements.length === 0)
-        return undefined;
-
-    // Sort the elements by Y co-ordinate and then by X co-ordinate.
-
-    let elementComparer = (a: Element, b: Element) => (a.y > b.y) ? 1 : ((a.y < b.y) ? -1 : ((a.x > b.x) ? 1 : ((a.x < b.x) ? -1 : 0)));
-    intersectingElements.sort(elementComparer);
-
-    // Join the elements into a single string.
-
-    return intersectingElements.map(element => element.text).join(" ").trim().replace(/\s\s+/g, " ");
-}
-
-// Constructs the full address string based on the specified address components.
-
-function formatAddress(houseNumber: string, streetName: string, suburbName: string) {
-    suburbName = suburbName.replace(/^HD WARD\//i, "").replace(/HD OF /i, "").replace(/^HD /i, "").replace(/ HD$/i, "").replace(/ SA$/, "").trim();
-    suburbName = SuburbNames[suburbName.toUpperCase()] || suburbName;
-    let separator = ((houseNumber !== "" || streetName !== "") && suburbName !== "") ? ", " : "";
-    return `${houseNumber} ${streetName}${separator}${suburbName}`.trim().replace(/\s\s+/g, " ").toUpperCase().replace(/\*/g, "");
-}
-
-// Parses the address from the house number, street name and suburb name.  Note that these
-// address components may actually contain multiple addresses (delimited by "ü" characters).
-
-function parseAddress(houseNumber: string, streetName: string, suburbName: string) {
-    // Two or more addresses are sometimes recorded in the same field.  This is done in a way
-    // which is ambiguous (ie. it is not possible to reconstruct the original addresses perfectly).
-    //
-    // For example, the following address:
-    //
-    //     House Number: ü35
-    //           Street: RAILWAYüSCHOOL TCE SOUTHüTERRA
-    //           Suburb: PASKEVILLEüPASKEVILLE
-    //
-    // should be interpreted as the following two addresses:
-    //
-    //     RAILWAY TCE SOUTH, PASKEVILLE
-    //     35 SCHOOL TERRA(CE), PASKEVILLE
-    //
-    // whereas the following address:
-    //
-    //     House Number: 79ü4
-    //           Street: ROSSLYNüSWIFT WINGS ROADüROAD
-    //           Suburb: WALLAROOüWALLAROO
-    //
-    // should be interpreted as the following two addresses:
-    //
-    //     79 ROSSLYN ROAD, WALLAROO
-    //     4 SWIFT WINGS ROAD, WALLAROO
-    //
-    // And so notice that in the first case above the "TCE" text of the Street belonged to the
-    // first address.  Whereas in the second case above the "WINGS" text of the Street belonged
-    // to the second address (this was deduced by examining actual existing street names).
-
-    if (!houseNumber.includes("ü"))
-        return formatAddress(houseNumber, streetName, suburbName);
-
-    // Split the house number on the "ü" character.
-
-    let houseNumberTokens = houseNumber.split("ü");
-
-    // Split the suburb name on the "ü" character.
-
-    let suburbNameTokens = suburbName.split("ü");
-
-    // The street name will have twice as many "ü" characters as the house number.  Each street
-    // name is broken in two and the resulting strings are joined into two groups (delimited
-    // by "ü" within the groups).  A single space is used to join the two groups together.
-    //
-    // For example, the street names "WALLACE STREET" and "MAY TERRACE" are broken in two as
-    // "WALLACE" and "STREET"; and "MAY" and "TERRACE".  And then joined back together into
-    // two groups, "WALLACEüMAY" and "STREETüTERRACE".  Those two groups are then concatenated
-    // together using a single intervening space to form "WALLACEüMAY STREETüTERRACE".
-    //
-    // Unfortunately, the street name is truncated at 30 characters so some of the "ü" characters
-    // may be missing.  Also note that there is an ambiguity in some cases as to whether a space
-    // is a delimiter or is just a space that happens to occur within a street name or suffix 
-    // (such as "Kybunga Top" in "Kybunga Top Road" or "TERRACE SOUTH" in "RAILWAY TERRACE SOUTH").
-    //
-    // For example,
-    //
-    //     PHILLIPSüHARBISON ROADüROAD     <-- street names broken in two and joined into groups
-    //     BarrüFrances StreetüTerrace     <-- street names broken in two and joined into groups
-    //     GOYDERüGOYDERüMail HDüHDüRoad   <-- street names broken in two and joined into groups
-    //     ORIENTALüWINDJAMMER COURTüCOUR  <-- truncated street suffix
-    //     TAYLORüTAYLORüTAYLOR STREETüST  <-- missing "ü" character due to truncation
-    //     EDGARüEASTüEAST STREETüTERRACE  <-- missing "ü" character due to truncation
-    //     SOUTH WESTüSOUTH WEST TERRACEü  <-- missing "ü" character due to truncation
-    //     ChristopherüChristopher Street  <-- missing "ü" character due to truncation
-    //     PORT WAKEFIELDüPORT WAKEFIELD   <-- missing "ü" character due to truncation
-    //     KENNETT STREETüKENNETT STREET   <-- missing "ü" character due to truncation (the missing text is probably " SOUTHüSOUTH")
-    //     NORTH WESTüNORTH WESTüNORTH WE  <-- missing "ü" characters due to truncation
-    //     RAILWAYüSCHOOL TCE SOUTHüTERRA  <-- ambiguous space delimiter
-    //     BLYTHüWHITE WELL HDüROAD        <-- ambiguous space delimiter
-    //     Kybunga TopüKybunga Top RoadüR  <-- ambiguous space delimiter
-    //     SOUTHüSOUTH TERRACE EASTüTERRA  <-- ambiguous space delimiter
-
-    // Artificially increase the street name tokens to twice the length (minus one) of the house
-    // number tokens (this then simplifies the following processing).  The "minus one" is because
-    // the middle token will be split in two later.
-
-    let streetNameTokens = streetName.split("ü");
-    while (streetNameTokens.length < 2 * houseNumberTokens.length - 1)
-        streetNameTokens.push("");
-
-    // Consider the following street name (however, realistically this would be truncated at
-    // 30 characters; this is ignored for the sake of explaining the parsing),
-    //
-    //     Kybunga TopüSmithüRailway South RoadüTerrace EastüTerrace
-    //
-    // This street name would be split into the following tokens,
-    //
-    //     Token 0: Kybunga Top
-    //     Token 1: Smith
-    //     Token 2: Railway South Road  <-- the middle token contains a delimiting space (it is ambiguous as to which space is the correct delimiter)
-    //     Token 3: Terrace East
-    //     Token 4: Terrace
-    //
-    // And from these tokens, the following candidate sets of tokens would be constructed (each
-    // broken into two groups).  Note that the middle token [Railway South Road] is broken into
-    // two tokens in different ways depending on which space is chosen as the delimiter for the
-    // groups: [Railway] and [South Road] or [Railway South] and [Road].
-    //
-    //     Candidate 1: [Kybunga Top] [Smith] [Railway]   [South Road] [Terrace East] [Terrace]
-    //                 └───────────╴Group 1╶───────────┘ └──────────────╴Group 2╶──────────────┘
-    //
-    //     Candidate 2: [Kybunga Top] [Smith] [Railway South]   [Road] [Terrace East] [Terrace]
-    //                 └──────────────╴Group 1╶──────────────┘ └───────────╴Group 2╶───────────┘
-
-    let candidates = [];
-
-    let middleTokenIndex = houseNumberTokens.length - 1;
-    if (!streetNameTokens[middleTokenIndex].includes(" "))  // the space may be missing if the street name is truncated at 30 characters
-        streetNameTokens[middleTokenIndex] += " ";  // artificially add a space to simplify the processing
-
-    let ambiguousTokens = streetNameTokens[middleTokenIndex].split(" ");
-    for (let index = 1; index < ambiguousTokens.length; index++) {
-        let group1 = [ ...streetNameTokens.slice(0, middleTokenIndex), ambiguousTokens.slice(0, index).join(" ")];
-        let group2 = [ ambiguousTokens.slice(index).join(" "), ...streetNameTokens.slice(middleTokenIndex + 1)];
-        candidates.push({ group1: group1, group2: group2, hasInvalidHundredName: false });
-    }
-
-    // Full street names (with suffixes) can now be constructed for each candidate (by joining
-    // together corresponding tokens from each group of tokens).
-
-    let addresses = [];
-    for (let candidate of candidates) {
-        for (let index = 0; index < houseNumberTokens.length; index++) {
-            // Expand street suffixes such as "Tce" to "TERRACE".
-
-            let streetSuffix = candidate.group2[index].split(" ")
-                .map(token => (StreetSuffixes[token.toUpperCase()] === undefined) ? token : StreetSuffixes[token.toUpperCase()])
-                .join(" ");
-
-            // Construct the full street name (including the street suffix).
-
-            let houseNumber = houseNumberTokens[index];
-            let streetName = (candidate.group1[index] + " " + streetSuffix).trim().replace(/\s\s+/g, " ");
-            if (streetName === "")
-                continue;  // ignore blank street names
-
-            // Check whether the street name is actually a hundred name such as "BARUNGA HD".
-
-            if (streetName.startsWith("HD ") || streetName.endsWith(" HD") || streetName.toUpperCase().endsWith(" HUNDRED")) {  // very likely a hundred name
-                let hundredNameMatch = didYouMean(streetName.slice(0, -3), HundredNames, { caseSensitive: false, returnType: didyoumean.ReturnTypeEnums.FIRST_CLOSEST_MATCH, thresholdType: didyoumean.ThresholdTypeEnums.EDIT_DISTANCE, threshold: 0, trimSpaces: true });
-                if (hundredNameMatch === null)
-                    candidate.hasInvalidHundredName = true;  // remember that there is an invalid hundred name (for example, "BARUNGA View HD")
-                continue;  // ignore all hundred names names
-            }
-
-            // Determine the associated suburb name.
-
-            let associatedSuburbName = suburbNameTokens[index];
-            if (associatedSuburbName === undefined || associatedSuburbName.trim() === "")
-                continue;  // ignore blank suburb names
-
-            // Choose the best matching street name (from the known street names).
-
-            let streetNameMatch = didYouMean(streetName, Object.keys(StreetNames), { caseSensitive: false, returnType: didyoumean.ReturnTypeEnums.FIRST_CLOSEST_MATCH, thresholdType: didyoumean.ThresholdTypeEnums.EDIT_DISTANCE, threshold: 0, trimSpaces: true });
-            if (streetNameMatch !== null)
-                addresses.push({ houseNumber: houseNumber, streetName: streetName, suburbName: associatedSuburbName, threshold: 0, candidate: candidate });
-            else {
-                streetNameMatch = didYouMean(streetName, Object.keys(StreetNames), { caseSensitive: false, returnType: didyoumean.ReturnTypeEnums.FIRST_CLOSEST_MATCH, thresholdType: didyoumean.ThresholdTypeEnums.EDIT_DISTANCE, threshold: 1, trimSpaces: true });
-                if (streetNameMatch !== null)
-                    addresses.push({ houseNumber: houseNumber, streetName: streetNameMatch, suburbName: associatedSuburbName, threshold: 1, candidate: candidate });
-                else {
-                    streetNameMatch = didYouMean(streetName, Object.keys(StreetNames), { caseSensitive: false, returnType: didyoumean.ReturnTypeEnums.FIRST_CLOSEST_MATCH, thresholdType: didyoumean.ThresholdTypeEnums.EDIT_DISTANCE, threshold: 2, trimSpaces: true });
-                    if (streetNameMatch !== null)
-                        addresses.push({ houseNumber: houseNumber, streetName: streetNameMatch, suburbName: associatedSuburbName, threshold: 2, candidate: candidate });
-                    else
-                        addresses.push({ houseNumber: houseNumber, streetName: streetName, suburbName: associatedSuburbName, threshold: Number.MAX_VALUE, candidate: candidate });  // unrecognised street name
-                }
-            }
-        }
-    }
-
-    if (addresses.length === 0)
-        return undefined;  // no valid addresses found
-
-    // Sort the addresses so that "better" addresses are moved to the front of the array.
-
-    addresses.sort(addressComparer);
-
-    // Format and return the "best" address.
-
-    let address = addresses[0];
-    return formatAddress(address.houseNumber, address.streetName, address.suburbName);
-}
-    
-// Returns a number indicating which address is "larger" (in this case "larger" means a "worse"
-// address).  This can be used to sort addresses so that "better" addresses, ie. those with a
-// house number and fewer spelling errors appear at the start of an array.
-
-function addressComparer(a, b) {
-    // As long as there are one or two spelling errors then prefer the address with a
-    // house number (even if it has more spelling errors).
-
-    if (a.threshold <= 2 && b.threshold <= 2) {
-        if (a.houseNumber === "" && b.houseNumber !== "")
-            return 1;
-        else if (a.houseNumber !== "" && b.houseNumber === "")
-            return -1;
-    }
-
-    // For larger numbers of spelling errors prefer addresses with fewer spelling errors before
-    // considering the presence of a house number.
-
-    if (a.threshold > b.threshold)
-        return 1;
-    else if (a.threshold < b.threshold)
-        return -1;
-
-    if (a.houseNumber === "" && b.houseNumber !== "")
-        return 1;
-    else if (a.houseNumber !== "" && b.houseNumber === "")
-        return -1;
-
-    // All other things being equal (as tested above), avoid addresses belonging to a candidate
-    // that has an invalid hundred name.  This is because having an invalid hundred name often
-    // means that the wrong delimiting space has been chosen for that candidate (as below where
-    // candidate 0 contains the invalid hundred name, "BARUNGA View HD", and so likely the other
-    // address in that candidate is also wrong, namely, "Lake Road").
-    //
-    // Where there are multiple candidates mark down the candidates that contain street names
-    // ending in " HD" and so likely represent a hundred name, but do not actually contain a
-    // valid hundred name.  For example, the valid street name "Lake View Road" in candidate 1
-    // is the better choice in the following because the hundred name "BARUNGA View HD" in
-    // candidate 0 is invalid.
-    //
-    //     BARUNGAüLake View HDüRoad
-    //
-    // Candidate 0: [BARUNGA] [Lake]   [View HD] [Road]
-    //             └───╴Group 1╶────┘ └───╴Group 2╶────┘
-    //     Resulting street names:
-    //         BARUNGA View HD  <-- invalid hundred name
-    //         Lake Road        <-- valid street name
-    //
-    // Candidate 1: [BARUNGA] [Lake View]   [HD] [Road]
-    //             └──────╴Group 1╶──────┘ └─╴Group 2╶─┘
-    //     Resulting street names:
-    //         BARUNGA HD      <-- valid hundred name 
-    //         Lake View Road  <-- valid street name
-
-    if (a.candidate.hasInvalidHundredName && !b.candidate.hasInvalidHundredName)
-        return 1;
-    else if (!a.candidate.hasInvalidHundredName && b.candidate.hasInvalidHundredName)
-        return -1;
-}
-
 // Parses the details from the elements associated with a single development application.
 
-function parseApplicationElements(elements: Element[], startElement: Element, informationUrl: string) {
-    let applicationNumberHeadingElement = elements.find(element => element.text.toLowerCase().replace(/\s/g, "").startsWith("applicationnumber"));
-    let lodgedDateHeadingElement = elements.find(element => element.text.toLowerCase().replace(/\s/g, "").startsWith("lodgeddate"));
-    let approvalDateHeadingElement = elements.find(element => element.text.toLowerCase().replace(/\s/g, "").startsWith("approvaldate"));
-    let descriptionHeadingElement = elements.find(element => element.text.toLowerCase().replace(/\s/g, "").startsWith("description"));
-    let propertyAddressHeadingElement = elements.find(element => element.text.toLowerCase().replace(/\s/g, "").startsWith("propertyaddress"));
-    let legalDescriptionHeadingElement = elements.find(element => element.text.toLowerCase().replace(/\s/g, "").startsWith("legaldescription"));
+function parseApplicationElements(elements: Element[], informationUrl: string) {
+    let applicationNumberHeadingBounds = findTextBounds(elements, "Application Number");
+    let lodgedDateHeadingBounds = findTextBounds(elements, "Lodged Date");
+    let approvalDateHeadingBounds = findTextBounds(elements, "Approval Date");
+    let descriptionHeadingBounds = findTextBounds(elements, "Description");
+    let propertyAddressHeadingBounds = findTextBounds(elements, "Property Address");
+    let legalDescriptionHeadingBounds = findTextBounds(elements, "Legal Description");
 
     // Get the application number.
 
-    if (applicationNumberHeadingElement === undefined) {
+    if (applicationNumberHeadingBounds === undefined) {
         let elementSummary = elements.map(element => `[${element.text}]`).join("");
         console.log(`Could not find the "Application Number" heading on the PDF page for the current development application.  The development application will be ignored.  Elements: ${elementSummary}`);
         return undefined;
     }
     let applicationNumberBounds = {
-        x: applicationNumberHeadingElement.x + applicationNumberHeadingElement.width,
-        y: applicationNumberHeadingElement.y,
-        width: (lodgedDateHeadingElement === undefined) ? 2 * applicationNumberHeadingElement.width : (lodgedDateHeadingElement.x - applicationNumberHeadingElement.x - applicationNumberHeadingElement.width),
-        height: applicationNumberHeadingElement.height
+        x: applicationNumberHeadingBounds.x + applicationNumberHeadingBounds.width,
+        y: applicationNumberHeadingBounds.y,
+        width: (lodgedDateHeadingBounds === undefined) ? 2 * applicationNumberHeadingBounds.width : (lodgedDateHeadingBounds.x - applicationNumberHeadingBounds.x - applicationNumberHeadingBounds.width),
+        height: applicationNumberHeadingBounds.height
     };
     let applicationNumber = elements.filter(element => getPercentageOfElementInRectangle(element, applicationNumberBounds) > 10).map(element => element.text).join(" ").trim().replace(/\s\s+/g, " ");
     if (applicationNumber === undefined || applicationNumber === "") {
@@ -706,64 +339,91 @@ function parseApplicationElements(elements: Element[], startElement: Element, in
     // Get the received date.
 
     let receivedDate: moment.Moment = undefined;
-    if (lodgedDateHeadingElement !== undefined) {
+    if (lodgedDateHeadingBounds !== undefined) {
         let receivedDateBounds = {
-            x: lodgedDateHeadingElement.x + lodgedDateHeadingElement.width,
-            y: lodgedDateHeadingElement.y,
-            width: (approvalDateHeadingElement === undefined) ? 2 * lodgedDateHeadingElement.width : (approvalDateHeadingElement.x - lodgedDateHeadingElement.x - lodgedDateHeadingElement.width),
-            height: lodgedDateHeadingElement.height
+            x: lodgedDateHeadingBounds.x + lodgedDateHeadingBounds.width,
+            y: lodgedDateHeadingBounds.y,
+            width: (approvalDateHeadingBounds === undefined) ? 2 * lodgedDateHeadingBounds.width : (approvalDateHeadingBounds.x - lodgedDateHeadingBounds.x - lodgedDateHeadingBounds.width),
+            height: lodgedDateHeadingBounds.height
         };
         let receivedDateText = elements.filter(element => getPercentageOfElementInRectangle(element, receivedDateBounds) > 10).map(element => element.text).join("").trim().replace(/\s\s+/g, " ");
         if (receivedDateText !== undefined)
-            receivedDate = moment(receivedDateText.trim(), "D/M/YYYY", true);
+            receivedDate = moment(receivedDateText.trim().substring(0, 10), "D/MM/YYYY", true);
     }
 
     // Get the description.
 
     let description = "";
-    if (descriptionHeadingElement !== undefined) {
+    if (descriptionHeadingBounds !== undefined) {
         let descriptionBounds = {
-            x: descriptionHeadingElement.x + descriptionHeadingElement.width,
-            y: descriptionHeadingElement.y,
+            x: descriptionHeadingBounds.x + descriptionHeadingBounds.width,
+            y: descriptionHeadingBounds.y,
             width: Number.MAX_VALUE,
-            height: descriptionHeadingElement.height
+            height: descriptionHeadingBounds.height
         };
-        description = elements.filter(element => getPercentageOfElementInRectangle(element, descriptionBounds) > 10).map(element => element.text).join(" ").trim().replace(/\s\s+/g, " ");
+        description = elements.filter(element => getPercentageOfElementInRectangle(element, descriptionBounds) > 10).map(element => element.text).join("").trim().replace(/\s\s+/g, " ");
     }
 
     // Get the address.
 
-    if (propertyAddressHeadingElement === undefined) {
+    if (propertyAddressHeadingBounds === undefined) {
         let elementSummary = elements.map(element => `[${element.text}]`).join("");
         console.log(`Could not find the "Property Address" heading on the PDF page for the current development application.  The development application will be ignored.  Elements: ${elementSummary}`);
         return undefined;
     }
     let addressBounds = {
-        x: propertyAddressHeadingElement.x + propertyAddressHeadingElement.width,
-        y: propertyAddressHeadingElement.y,
+        x: propertyAddressHeadingBounds.x + propertyAddressHeadingBounds.width,
+        y: propertyAddressHeadingBounds.y,
         width: Number.MAX_VALUE,
-        height: (legalDescriptionHeadingElement === undefined) ? Number.MAX_VALUE : (legalDescriptionHeadingElement.y - propertyAddressHeadingElement.y)
+        height: (legalDescriptionHeadingBounds === undefined) ? Number.MAX_VALUE : (legalDescriptionHeadingBounds.y - propertyAddressHeadingBounds.y)
     };
-    let address = elements.filter(element => getPercentageOfElementInRectangle(element, addressBounds) > 10).map(element => element.text).join(" ").trim().replace(/\s\s+/g, " ");
-
-    if (address === undefined || address.trim() === "")
+    let addressElements = elements.filter(element => getPercentageOfElementInRectangle(element, addressBounds) > 10);
+    
+    let addressText = addressElements.map(element => element.text).join("").trim().replace(/\s\s+/g, " ");
+    if (addressText === undefined || addressText.trim() === "")
     {
         let elementSummary = elements.map(element => `[${element.text}]`).join("");
         console.log(`Application number ${applicationNumber} will be ignored because there is no address.  Elements: ${elementSummary}`);
         return undefined;
     }
 
+    // Group the address elements into rows.
+
+    let addressRows: Element[][] = [];
+    for (let addressElement of addressElements) {
+        let addressRow = addressRows.find(row => Math.abs(row[0].y - addressElement.y) < 2 * Tolerance);  // approximate Y co-ordinate match
+        if (addressRow === undefined)
+            addressRows.push([ addressElement ]);  // start a new row
+        else
+            addressRow.push(addressElement);  // add to an existing row
+    }
+
+    let address = addressRows.map(addressRow => addressRow.map(element => element.text).join(" ").trim().replace(/\s\s+/g, " ")).join(", ");
+
     // Get the legal description.
 
     let legalDescription = "";
-    if (legalDescriptionHeadingElement !== undefined) {
+    if (legalDescriptionHeadingBounds !== undefined) {
         let legalDescriptionBounds = {
-            x: legalDescriptionHeadingElement.x + legalDescriptionHeadingElement.width,
-            y: legalDescriptionHeadingElement.y,
+            x: legalDescriptionHeadingBounds.x + legalDescriptionHeadingBounds.width,
+            y: legalDescriptionHeadingBounds.y,
             width: Number.MAX_VALUE,
             height: Number.MAX_VALUE
         };
-        legalDescription = elements.filter(element => getPercentageOfElementInRectangle(element, legalDescriptionBounds) > 10).map(element => element.text).join(" ").trim().replace(/\s\s+/g, " ");
+        let legalDescriptionElements = elements.filter(element => getPercentageOfElementInRectangle(element, legalDescriptionBounds) > 10);
+
+        // Group the legal description elements into rows.
+
+        let legalDescriptionRows: Element[][] = [];
+        for (let legalDescriptionElement of legalDescriptionElements) {
+            let legalDescriptionRow = legalDescriptionRows.find(row => Math.abs(row[0].y - legalDescriptionElement.y) < 2 * Tolerance);  // approximate Y co-ordinate match
+            if (legalDescriptionRow === undefined)
+                legalDescriptionRows.push([ legalDescriptionElement ]);  // start a new row
+            else
+                legalDescriptionRow.push(legalDescriptionElement);  // add to an existing row
+        }
+
+        legalDescription = legalDescriptionRows.map(legalDescriptionRow => legalDescriptionRow.map(element => element.text).join("").trim().replace(/\s\s+/g, " ")).join(", ");
     }
 
     // Construct the resulting application information.
@@ -826,9 +486,9 @@ async function parsePdf(url: string) {
         if (global.gc)
             global.gc();
 
-        // Sort the elements by Y co-ordinate and then by X co-ordinate.
+        // Sort the elements by approximate Y co-ordinate and then by X co-ordinate.
 
-        let elementComparer = (a, b) => (a.y > b.y) ? 1 : ((a.y < b.y) ? -1 : ((a.x > b.x) ? 1 : ((a.x < b.x) ? -1 : 0)));
+        let elementComparer = (a, b) => (Math.abs(a.y - b.y) < Tolerance) ? ((a.x > b.x) ? 1 : ((a.x < b.x) ? -1 : 0)) : ((a.y > b.y) ? 1 : -1);
         elements.sort(elementComparer);
 
         // Group the elements into sections based on where the "Application No" text starts.
@@ -863,7 +523,7 @@ async function parsePdf(url: string) {
         // instead of being ignored).
 
         for (let applicationElementGroup of applicationElementGroups) {
-            let developmentApplication = parseApplicationElements(applicationElementGroup.elements, applicationElementGroup.startElement, url);
+            let developmentApplication = parseApplicationElements(applicationElementGroup.elements, url);
             if (developmentApplication !== undefined) {
                 let suffix = 0;
                 let applicationNumber = developmentApplication.applicationNumber;
