@@ -333,7 +333,7 @@ function parseApplicationElements(elements: Element[], informationUrl: string) {
         console.log(`Could not find the application number on the PDF page for the current development application.  The development application will be ignored.  Elements: ${elementSummary}`);
         return undefined;
     }
-    applicationNumber = applicationNumber.trim().replace(/\s[A-Z]*$/i, "").replace(/\s\s+/g, "").trim();
+    applicationNumber = applicationNumber.trim().replace(/\s[A-Z]*$/i, "").replace(/\s/g, "").trim();
     console.log(`    Found \"${applicationNumber}\".`);
 
     // Get the received date.
@@ -398,7 +398,8 @@ function parseApplicationElements(elements: Element[], informationUrl: string) {
             addressRow.push(addressElement);  // add to an existing row
     }
 
-    let address = addressRows.map(addressRow => addressRow.map(element => element.text).join(" ").trim().replace(/\s\s+/g, " ")).join(", ");
+    let addressLines = addressRows.map(addressRow => addressRow.map(element => element.text).join(" ").trim().replace(/\s\s+/g, " "));
+    let address = addressLines.filter(line => line !== "").join(", ");  // ignore blank lines
 
     // Get the legal description.
 
@@ -423,7 +424,8 @@ function parseApplicationElements(elements: Element[], informationUrl: string) {
                 legalDescriptionRow.push(legalDescriptionElement);  // add to an existing row
         }
 
-        legalDescription = legalDescriptionRows.map(legalDescriptionRow => legalDescriptionRow.map(element => element.text).join("").trim().replace(/\s\s+/g, " ")).join(", ");
+        let legalDescriptionLines = legalDescriptionRows.map(legalDescriptionRow => legalDescriptionRow.map(element => element.text).join("").trim().replace(/\s\s+/g, " "));
+        legalDescription = legalDescriptionLines.filter(line => line !== "").join(", ");  // ignore blank lines
     }
 
     // Construct the resulting application information.
